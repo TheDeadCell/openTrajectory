@@ -1,0 +1,171 @@
+# 1-DOF Sounding Rocket Trajectory Simulator (OpenMotor → MATLAB)
+
+A MATLAB script that predicts the vertical flight of a sounding rocket from an **OpenMotor** thrust / propellant-mass export, a few vehicle parameters, and an **ISA atmosphere** with altitude-dependent gravity and speed of sound.
+
+Its main purpose is to give **velocity, altitude and Mach-number histories** that can be used as **freestream (inlet) boundary conditions for external CFD** of the rocket (for example in OpenFOAM).
+
+![MATLAB R2019b+](https://img.shields.io/badge/MATLAB-R2019b%2B-orange)
+![Status](https://img.shields.io/badge/model-1--DOF-blue)
+
+---
+
+## Features
+
+- Reads thrust **T(t)** and propellant mass **m(t)** directly from an OpenMotor CSV export
+- **Multi-grain motors**: every `Propellant Mass(...)` column is summed automatically
+- Automatic column detection and **unit parsing from the CSV headers** (N, kN, lbf, kg, g, lb, oz, s, ms, min)
+- ISA atmosphere (0–32 km) with geopotential altitude, gravity that falls with altitude, and local speed of sound
+- Mach-dependent drag coefficient, scaled from a single user-supplied subsonic `Cd`
+- Launch-site elevation input
+- Motor diagnostics: burn time, peak and average thrust, total impulse, initial thrust-to-weight ratio
+- Results: burnout state, max velocity and Mach number, peak g-load, apogee
+- Four figures, including **altitude vs velocity with Mach-number markers** (useful for choosing CFD inlet points)
+
+## Requirements
+
+- MATLAB **R2019b or newer** (uses `readtable` with `VariableNamingRule` and local functions in scripts)
+- No additional toolboxes
+- An OpenMotor CSV export (*File → Export → Simulation results → CSV*)
+
+## Quick start
+
+1. Clone the repository and open MATLAB in its folder.
+2. Run the script:
+   ```matlab
+   rocket_trajectory_openmotor_corrected
+   ```
+3. Answer the prompts:
+
+   | Prompt | Meaning |
+   |---|---|
+   | Dry mass | Rocket mass **without propellant**, including the empty motor casing, nozzle and closures (kg) |
+   | Body tube diameter | Reference diameter (mm). The reference area is π d² / 4 |
+   | Subsonic drag coefficient | Typically 0.3–0.5, referenced to the same area |
+   | Launch site elevation | Metres above sea level (Enter = 0) |
+
+4. Pick the OpenMotor CSV in the file dialog. A sample file is in `examples/`.
+
+## OpenMotor CSV format
+
+The script expects a header similar to:
+
+```
+Time(s),Thrust(N),Propellant Mass(G1;kg),Propellant Mass(G2;kg)
+```
+
+- Units are read from the **last parentheses** of each header (the text after `;` is used, so `G1;kg` → `kg`).
+- Columns whose header contains `mass` but not `flow` / `flux` are treated as grain masses and summed. If a `total` mass column exists, only that column is used.
+- If a column cannot be detected, the script lists the headers and asks for column numbers.
+- Thrust is `0 N` at `t = 0` in OpenMotor exports; the initial thrust-to-weight ratio is therefore computed from the first **non-zero** thrust sample.
+- After the last CSV row the thrust is zero and the propellant mass is held at its last value (any unburnt residue stays on the rocket).
+
+## Output
+
+**Console**
+
+```
+--- Motor data summary ---
+Burn time, peak / average thrust, total impulse, propellant mass per grain,
+liftoff mass, initial thrust-to-weight ratio
+
+================ TRAJECTORY RESULTS ================
+Duration of motor burn, burnout velocity and altitude,
+max velocity (Mach), max acceleration (g-load), time to apogee,
+predicted apogee (AGL)
+====================================================
+```
+
+**Figures**
+
+1. Overview: altitude and velocity, thrust and mass, drag coefficient
+2. Altitude vs time
+3. Velocity vs time
+4. Altitude vs velocity, with markers at Mach 0.5, 1.0, 1.5, … (once while accelerating, once while coasting)
+
+Altitude is **above ground level**; the atmosphere is evaluated at launch elevation + altitude.
+
+## Physics in brief
+
+State equations (vertical flight, variable mass):
+
+$$\frac{dh}{dt}=v,\qquad \frac{dv}{dt}=\frac{F_T(t)-D}{m(t)}-g(h)$$
+
+$$D=\tfrac12\,\rho\,v\,|v|\,S\,C_d(\mathrm{Ma}),\qquad m(t)=m_\mathrm{dry}+\sum_j m_{p,j}(t),\qquad g(h)=g_0\left(\frac{R_E}{R_E+h}\right)^2$$
+
+- Thrust includes exhaust momentum, so only the instantaneous mass is needed.
+- ISA layers (0–11 km, 11–20 km isothermal, 20–32 km) give `ρ`, `a = √(γRT)` and hence Mach number.
+- `Cd(Ma)` is a continuous piecewise approximation (subsonic plateau, transonic rise to a peak near Mach 1, supersonic decay), scaled by `Cd0 / 0.35`.
+- Integration: explicit Euler for velocity, trapezoidal rule for position, `dt = 2 ms`, thrust and mass linearly interpolated from the CSV.
+- The run stops at apogee (first step with `v ≤ 0` after launch).
+
+A full derivation, code walkthrough and verification checklist are in [`docs/trajectory_physics.pdf`](docs/trajectory_physics.pdf) (source: `docs/trajectory_physics.tex`).
+
+## Using the results as CFD inlet conditions
+
+1. Choose a Mach number from the altitude-vs-velocity graph and read the altitude `h` and velocity `U`.
+2. Evaluate the ISA state at `h0 + h` to get static `T`, `p` and `ρ` (static values are what density-based solvers such as `rhoCentralFoam` expect at the inlet).
+3. Use `U = Ma · √(γRT)` and, for viscous runs, Sutherland's law for `μ`.
+4. The flow is quasi-steady if `a_rocket · L / U² ≪ 1`, which holds for typical sounding rockets.
+
+Details and formulas are in Section 10 of the documentation.
+
+## Assumptions and limitations
+
+- Vertical, point-mass flight (no launch angle, wind, weathercocking or angle of attack)
+- Thrust and propellant mass are prescribed by OpenMotor (no altitude correction of thrust)
+- ISA atmosphere only (no temperature offset or humidity), valid to 32 km; a warning is printed above that
+- The drag coefficient is an **approximation**; the same curve is used for burn and coast (power-on base-drag reduction is ignored)
+- Simulation ends at apogee (no descent or recovery)
+
+Peak speed and Mach number are far less sensitive to `Cd` than apogee is, because the maximum speed occurs during the burn.
+
+## Verification suggestions
+
+- Compare the printed motor summary with OpenMotor's own summary screen
+- Check the velocity budget: Tsiolkovsky velocity minus gravity and drag losses ≈ burnout velocity
+- Halve `dt` and confirm the apogee changes by well under 0.1 %
+- Compare apogee and maximum velocity with OpenRocket or RASAero II for the same motor and mass
+
+## Repository structure
+
+```
+.
+├── rocket_trajectory_openmotor_corrected.m   # main script (functions at the end of the file)
+├── README.md
+├── docs/
+│   ├── trajectory_physics.tex                # physics and code explanation (LaTeX)
+│   ├── trajectory_physics.pdf
+│   └── logos/                                # logo_matlab.png, logo_sangai.png, logo_openmotor.png
+└── examples/
+    └── BJHB.csv                              # sample two-grain OpenMotor export
+```
+
+Build the documentation (run twice for cross-references):
+
+```bash
+cd docs
+pdflatex trajectory_physics.tex
+pdflatex trajectory_physics.tex
+```
+
+## Roadmap
+
+- [ ] Cd vs Mach table input (CFD / RASAero) replacing the built-in curve
+- [ ] Separate power-on and power-off drag
+- [ ] ISA + ΔT temperature offset
+- [ ] Launch angle and wind (2-D point-mass model)
+- [ ] CSV export of freestream state (t, h, v, Ma, T, p, ρ, q) for CFD case set-up
+- [ ] RK4 integrator
+
+## Disclosure of AI assistance
+
+As noted in the source comments, the CSV-reading code and the plotting code were generated with the help of a generative AI tool. All AI-assisted parts should be independently reviewed before the results are used for design decisions.
+
+## Acknowledgements
+
+- [OpenMotor](https://github.com/reilleya/openMotor) for solid-rocket-motor simulation and the thrust data format
+- U.S. Standard Atmosphere (ISA) for the atmosphere layers
+
+## Author
+
+A. Deouskar
